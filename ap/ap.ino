@@ -1,0 +1,302 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+#include "esp_camera.h"
+
+// CAMERA MODEL
+#define CAMERA_MODEL_AI_THINKER
+#include "camera_pins.h"
+
+// === CONFIG ===
+const char* ssid = "ESP32-CAM-AP";
+const char* password = "12345678";
+IPAddress clientIP(192,168,4,2);
+
+#define SRC_WIDTH  160
+#define SRC_HEIGHT 120
+#define IMG_WIDTH   80
+#define IMG_HEIGHT  60
+#define HALF_WIDTH  40
+
+
+//
+#define WINDOW_SIZE 5
+#define HALF_WINDOW (WINDOW_SIZE / 2)
+
+#define DS_WIDTH 80
+#define DS_HEIGHT 60
+#define DS_HALF_WIDTH 40
+
+// === BUFFERS ===
+uint8_t downsampledFrame[IMG_WIDTH * IMG_HEIGHT];
+uint8_t apLeftHalf[IMG_HEIGHT * HALF_WIDTH];
+uint8_t apRightHalf[IMG_HEIGHT * HALF_WIDTH];
+uint8_t clientRightHalf[IMG_HEIGHT * HALF_WIDTH];
+uint8_t depthMap[IMG_WIDTH * IMG_HEIGHT];
+
+
+//
+uint8_t worldXmap[DS_HEIGHT * DS_HALF_WIDTH];
+uint8_t worldYmap[DS_HEIGHT * DS_HALF_WIDTH];
+uint8_t worldZmap[DS_HEIGHT * DS_HALF_WIDTH];
+
+
+
+
+
+WebServer server(80);
+WiFiClient client;
+
+void setupCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer   = LEDC_TIMER_0;
+  config.pin_d0       = Y2_GPIO_NUM;
+  config.pin_d1       = Y3_GPIO_NUM;
+  config.pin_d2       = Y4_GPIO_NUM;
+  config.pin_d3       = Y5_GPIO_NUM;
+  config.pin_d4       = Y6_GPIO_NUM;
+  config.pin_d5       = Y7_GPIO_NUM;
+  config.pin_d6       = Y8_GPIO_NUM;
+  config.pin_d7       = Y9_GPIO_NUM;
+  config.pin_xclk     = XCLK_GPIO_NUM;
+  config.pin_pclk     = PCLK_GPIO_NUM;
+  config.pin_vsync    = VSYNC_GPIO_NUM;
+  config.pin_href     = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn     = PWDN_GPIO_NUM;
+  config.pin_reset    = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_GRAYSCALE;
+  config.frame_size   = FRAMESIZE_QQVGA; // 160x120
+  config.jpeg_quality = 12;
+  config.fb_count     = 1;
+
+  if (esp_camera_init(&config) != ESP_OK) {
+    Serial.println("Camera init failed");
+    while (1);
+  }
+}
+
+void downsample2x2(uint8_t* src, uint8_t* dest) {
+  for (int y = 0; y < IMG_HEIGHT; y++) {
+    for (int x = 0; x < IMG_WIDTH; x++) {
+      int sx = x * 2;
+      int sy = y * 2;
+      uint16_t sum = 0;
+      sum += src[ sy      * SRC_WIDTH + sx     ];
+      sum += src[ sy      * SRC_WIDTH + (sx+1) ];
+      sum += src[ (sy+1)  * SRC_WIDTH + sx     ];
+      sum += src[ (sy+1)  * SRC_WIDTH + (sx+1) ];
+      dest[ y * IMG_WIDTH + x ] = sum / 4;
+    }
+  }
+}
+
+void captureAndSplit() {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Capture failed");
+    return;
+  }
+  downsample2x2(fb->buf, downsampledFrame);
+  esp_camera_fb_return(fb);
+
+  for (int y = 0; y < IMG_HEIGHT; y++) {
+    memcpy(&apLeftHalf[y * HALF_WIDTH], &downsampledFrame[y * IMG_WIDTH], HALF_WIDTH);
+    memcpy(&apRightHalf[y * HALF_WIDTH], &downsampledFrame[y * IMG_WIDTH + HALF_WIDTH], HALF_WIDTH);
+  }
+}
+/////////////////////////geting post value 
+void handlePostClientRight() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    int idx = 0, start = 0;
+
+    while (idx < IMG_HEIGHT * HALF_WIDTH && start < body.length()) {
+      int end = body.indexOf(',', start);
+      if (end == -1) end = body.length();
+      apRightHalf[idx] = body.substring(start, end).toInt();
+      idx++;
+      start = end + 1;
+    }
+
+    server.send(200, "text/plain", "clientRightHalf received and stored in apRightHalf");
+  } else {
+    server.send(400, "text/plain", "Missing payload");
+  }
+}
+
+
+
+
+int findBestVerticalDisparityRight(int x, int y, int maxDisparity) {
+    int bestDisparity = 0;
+    int minSAD = INT32_MAX;
+
+    for (int d = 0; d < maxDisparity; ++d) {
+        int matchY = y + d;
+
+        // Check window boundaries for top and bottom patches
+        if (matchY + HALF_WINDOW >= IMG_HEIGHT ||  // bottom patch lower bound check
+            y - HALF_WINDOW < 0 ||                  // top patch upper bound check
+            matchY - HALF_WINDOW < 0)                // bottom patch upper bound check
+        {
+            continue; // Skip disparities that would go outside image boundaries
+        }
+
+        int sad = 0;
+
+        for (int dy = -HALF_WINDOW; dy <= HALF_WINDOW; ++dy) {
+            int topY = y + dy;
+            int bottomY = matchY + dy;
+
+            for (int dx = -HALF_WINDOW; dx <= HALF_WINDOW; ++dx) {
+                int px = x + dx;
+
+                if (px < 0 || px >= HALF_WIDTH || bottomY < 0 || bottomY >= IMG_HEIGHT)
+                    continue;
+
+                int topIndex = topY * HALF_WIDTH + px;
+                int bottomIndex = bottomY * HALF_WIDTH + px;
+
+                uint8_t topVal = apRightHalf[topIndex];
+                uint8_t bottomVal = clientRightHalf[bottomIndex];
+
+                sad += abs(topVal - bottomVal);
+            }
+        }
+
+        if (sad < minSAD) {
+            minSAD = sad;
+            bestDisparity = d;
+        }
+    }
+
+    return bestDisparity;
+}
+
+float computeDepth(int disparity, float focalLength, float baseline) {
+    if (disparity == 0) return 255.0f;  // avoid division by zero, assume far away
+
+    return (focalLength * baseline) / disparity;
+}
+
+// all calculations
+void computeRightDepth() {
+  float focalLength = 25.0f;  // Adjusted due to 2x downscale
+  float baseline = 10.0f;     // cm
+  float cx = DS_HALF_WIDTH / 2.0f;
+  float cy = DS_HEIGHT / 2.0f;
+
+  for (int y = 0; y < DS_HEIGHT; y++) {
+    for (int x = 0; x < DS_HALF_WIDTH; x++) {
+      int disp = findBestVerticalDisparityRight(x, y, 60);  // maxDisparity = 60
+      float depth = computeDepth(disp, focalLength, baseline);
+
+      if (depth > 255.0f || disp == 0) depth = 255.0f;
+
+      float worldX = (x - cx) * depth / focalLength;
+      float worldY = (y - cy) * depth / focalLength;
+
+      int scaledX = (int)(worldX + 127.5f);
+      int scaledY = (int)(worldY + 127.5f);
+
+      scaledX = constrain(scaledX, 0, 255);
+      scaledY = constrain(scaledY, 0, 255);
+
+      int index = y * DS_HALF_WIDTH + x;
+      worldXmap[index] = (uint8_t)scaledX;
+      worldYmap[index] = (uint8_t)scaledY;
+      worldZmap[index] = (uint8_t)depth;
+    }
+  }
+}
+
+
+
+void handleGetDepth() {
+  Serial.println("Start depth flow...");
+
+  captureAndSplit();
+
+  // Trigger client capture
+  HTTPClient http;
+  http.begin(client, "http://192.168.4.2/capture");
+  http.GET();
+  http.end();
+
+  // Send LEFT half to client
+  HTTPClient http2;
+  http2.begin(client, "http://192.168.4.2/receive_left_half");
+  String payload = "";
+  for (int i = 0; i < IMG_HEIGHT * HALF_WIDTH; i++) {
+    payload += String(apLeftHalf[i]);
+    if (i < IMG_HEIGHT * HALF_WIDTH - 1) payload += ",";
+  }
+  http2.POST(payload);
+  http2.end();//////////////////////////////////////////
+
+  //get the right half
+
+  //calculate x, y, z values and store
+
+  computeRightDepth();
+
+  //last depth value sending at the end
+  String json = "[";
+  for (int i = 0; i < IMG_WIDTH * IMG_HEIGHT; i++) {
+    json += String(depthMap[i]);
+    if (i < IMG_WIDTH * IMG_HEIGHT - 1) json += ",";
+  }
+  json += "]";
+  server.send(200, "application/json", json);
+  //server.send(200, "text/plain", "AP done");
+}
+
+void handleReceiveLeftDepth() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    int idx = 0, start = 0;
+    while (idx < IMG_HEIGHT * HALF_WIDTH) {
+      int end = body.indexOf(',', start);
+      if (end == -1) end = body.length();
+      depthMap[idx] = body.substring(start, end).toInt();
+      idx++;
+      start = end + 1;
+    }
+    server.send(200, "text/plain", "Left depth OK");
+  } else {
+    server.send(400, "text/plain", "No data");
+  }
+}
+/*
+void handleDepthMap() {
+  String json = "[";
+  for (int i = 0; i < IMG_WIDTH * IMG_HEIGHT; i++) {
+    json += String(depthMap[i]);
+    if (i < IMG_WIDTH * IMG_HEIGHT - 1) json += ",";
+  }
+  json += "]";
+  server.send(200, "application/json", json);
+}
+*/
+void setup() {
+  Serial.begin(115200);
+  setupCamera();
+  WiFi.softAP(ssid, password);
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/get_depth", HTTP_GET, handleGetDepth);
+  server.on("/post_left_depth", HTTP_POST, handleReceiveLeftDepth);
+  server.on("/post_client_right", HTTP_POST, handlePostClientRight);/////////////
+
+  //server.on("/depth_map", HTTP_GET, handleDepthMap);
+  server.begin();
+  Serial.println("AP ready");
+}
+
+void loop() {
+  server.handleClient();
+}
