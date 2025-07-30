@@ -218,7 +218,7 @@ void sendClientRightHalfToAP() {
 void handleCapture() {
   captureAndSplit();
   server.send(200, "text/plain", "Client capture OK");
-  sendClientRightHalfToAP();//send right half
+ ////////////////////// sendClientRightHalfToAP();//send right half
 }
 
 //receved ap left half
@@ -236,12 +236,12 @@ void handleReceiveLeftHalf() {
 
     ////////////////
     
-
+    printApLeftHalf();
     //then go to calculation
 
 
-    computeLeftDepth();////////////////////////////
-
+    //computeLeftDepth();////////////////////////////
+/*
     HTTPClient http;
     String url = "http://" + apIP.toString() + "/post_left_depth";
     http.begin(url);
@@ -252,30 +252,71 @@ void handleReceiveLeftHalf() {
     }
     http.POST(payload);
     http.end();
-
+*/
     server.send(200, "text/plain", "Left depth sent");
   } else {
     server.send(400, "text/plain", "No data");
   }
 }
+///////////////////////////
+void handleSendClientRightHalf() {
+  String payload = "";
+  for (int i = 0; i < IMG_HEIGHT * HALF_WIDTH; i++) {
+    payload += String(clientRightHalf[i]);
+    if (i < IMG_HEIGHT * HALF_WIDTH - 1) payload += ",";
+  }
+  server.send(200, "text/plain", payload);
+}
+
+void printApLeftHalf() {
+  Serial.println("==== clientRightHalf (40x60) ====");
+
+  for (int y = 0; y < IMG_HEIGHT; y++) {
+    for (int x = 0; x < HALF_WIDTH; x++) {
+      int index = y * HALF_WIDTH + x;
+      Serial.print(apLeftHalf[index]);
+      Serial.print("\t"); // Tab-separated for readability
+    }
+    Serial.println(); // Newline after each row
+  }
+
+  Serial.println("=================================");
+}
 
 void setup() {
   Serial.begin(115200);
   setupCamera();
+
+  Serial.println("🔌 Connecting to AP...");
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) { // max 15 seconds
     delay(500);
     Serial.print(".");
+    attempts++;
   }
-  Serial.println("Client connected");
 
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ Client connected to AP!");
+    Serial.print("📶 IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n❌ Failed to connect to AP. Check if AP is powered and broadcasting.");
+    return;
+  }
+
+  // Setup web routes
   server.on("/capture", HTTP_GET, handleCapture);
   server.on("/receive_left_half", HTTP_POST, handleReceiveLeftHalf);
+  server.on("/send_client_right", HTTP_GET, handleSendClientRightHalf);
+
   server.begin();
-  Serial.println("Client ready");
+  Serial.println("🌐 Client server started");
 }
+
 
 void loop() {
   server.handleClient();
+  
 }

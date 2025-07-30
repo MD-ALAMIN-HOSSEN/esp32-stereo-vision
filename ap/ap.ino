@@ -17,7 +17,7 @@ IPAddress clientIP(192,168,4,2);
 #define IMG_WIDTH   80
 #define IMG_HEIGHT  60
 #define HALF_WIDTH  40
-
+int ColumnSums[56];
 
 //
 #define WINDOW_SIZE 5
@@ -32,15 +32,15 @@ uint8_t downsampledFrame[IMG_WIDTH * IMG_HEIGHT];
 uint8_t apLeftHalf[IMG_HEIGHT * HALF_WIDTH];
 uint8_t apRightHalf[IMG_HEIGHT * HALF_WIDTH];
 uint8_t clientRightHalf[IMG_HEIGHT * HALF_WIDTH];
-uint8_t depthMap[IMG_WIDTH * IMG_HEIGHT];
+//uint8_t depthMap[IMG_WIDTH * IMG_HEIGHT];
 
 
 //
 uint8_t worldXmap[DS_HEIGHT * DS_HALF_WIDTH];
 uint8_t worldYmap[DS_HEIGHT * DS_HALF_WIDTH];
-uint8_t worldZmap[DS_HEIGHT * DS_HALF_WIDTH];
+float worldZmap[DS_HEIGHT * DS_HALF_WIDTH];
 
-
+bool startDepthProcess;
 
 
 
@@ -78,6 +78,48 @@ void setupCamera() {
     while (1);
   }
 }
+
+/////////////////////////////////
+void printClientRightHalf() {
+  Serial.println("==== clientRightHalf (40x60) ====");
+
+  for (int y = 0; y < IMG_HEIGHT; y++) {
+    for (int x = 0; x < HALF_WIDTH; x++) {
+      int index = y * HALF_WIDTH + x;
+      Serial.print(clientRightHalf[index]);
+      Serial.print("\t"); // Tab-separated for readability
+    }
+    Serial.println(); // Newline after each row
+  }
+
+  Serial.println("=================================");
+}
+
+
+void fetchClientRightHalf() {
+  HTTPClient http;
+  http.begin(client, "http://192.168.4.2/send_client_right");  // client IP must be correct
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String body = http.getString();
+
+    int idx = 0, start = 0;
+    while (idx < IMG_HEIGHT * HALF_WIDTH && start < body.length()) {
+      int end = body.indexOf(',', start);
+      if (end == -1) end = body.length();
+      clientRightHalf[idx++] = body.substring(start, end).toInt();
+      start = end + 1;
+    }
+
+    Serial.println("✅ Right half received from client.");
+  } else {
+    Serial.printf("❌ Failed to fetch client right half. HTTP code: %d\n", httpCode);
+  }
+
+  http.end();
+}
+
 
 void downsample2x2(uint8_t* src, uint8_t* dest) {
   for (int y = 0; y < IMG_HEIGHT; y++) {
@@ -128,45 +170,76 @@ void handlePostClientRight() {
   }
 }
 
+//////////////
+void calculateColumnSums(int x){
+    for (int y = 2; y < IMG_HEIGHT-2; y++) {
+        int index = y -2;
+        ColumnSums[index] =  apRightHalf[(y-2)*HALF_WIDTH + (x-2)] +
+                             apRightHalf[(y-2)*HALF_WIDTH + (x-1)] +
+                             apRightHalf[(y-2)*HALF_WIDTH + (x)] +
+                             apRightHalf[(y-2)*HALF_WIDTH + (x+1)] +
+                             apRightHalf[(y-2)*HALF_WIDTH + (x+2)] +
+                             apRightHalf[(y-1)*HALF_WIDTH + (x-2)] +
+                             apRightHalf[(y-1)*HALF_WIDTH + (x-1)] +
+                             apRightHalf[(y-1)*HALF_WIDTH + (x)] +
+                             apRightHalf[(y-1)*HALF_WIDTH + (x+1)] +
+                             apRightHalf[(y-1)*HALF_WIDTH + (x+2)] +
+                             apRightHalf[y*HALF_WIDTH + (x-2)] +
+                             apRightHalf[y*HALF_WIDTH + (x-1)] +
+                             apRightHalf[y*HALF_WIDTH + (x)] +
+                             apRightHalf[y*HALF_WIDTH + (x+1)] +
+                             apRightHalf[y*HALF_WIDTH + (x+2)] +
+                             apRightHalf[(y+1)*HALF_WIDTH + (x-2)] +
+                             apRightHalf[(y+1)*HALF_WIDTH + (x-1)] +
+                             apRightHalf[(y+1)*HALF_WIDTH + (x)] +
+                             apRightHalf[(y+1)*HALF_WIDTH + (x+1)] +
+                             apRightHalf[(y+1)*HALF_WIDTH + (x+2)] +
+                             apRightHalf[(y+2)*HALF_WIDTH + (x-2)] +
+                             apRightHalf[(y+2)*HALF_WIDTH + (x-1)] +
+                             apRightHalf[(y+2)*HALF_WIDTH + (x)] +
+                             apRightHalf[(y+2)*HALF_WIDTH + (x+2)]+
+                             apRightHalf[(y+2)*HALF_WIDTH + (x+1)]; 
+        
+    }
+}
 
-
-
-int findBestVerticalDisparityRight(int x, int y, int maxDisparity) {
+int findBestVerticalDisparityRight(int x, int yy, int maxDisparity) {
     int bestDisparity = 0;
     int minSAD = INT32_MAX;
 
     for (int d = 0; d < maxDisparity; ++d) {
-        int matchY = y + d;
-
-        // Check window boundaries for top and bottom patches
-        if (matchY + HALF_WINDOW >= IMG_HEIGHT ||  // bottom patch lower bound check
-            y - HALF_WINDOW < 0 ||                  // top patch upper bound check
-            matchY - HALF_WINDOW < 0)                // bottom patch upper bound check
-        {
-            continue; // Skip disparities that would go outside image boundaries
-        }
-
+        int y = yy + d;
         int sad = 0;
+        //if (y - 2 < 0 || y + 2 >= IMG_HEIGHT) continue;
 
-        for (int dy = -HALF_WINDOW; dy <= HALF_WINDOW; ++dy) {
-            int topY = y + dy;
-            int bottomY = matchY + dy;
 
-            for (int dx = -HALF_WINDOW; dx <= HALF_WINDOW; ++dx) {
-                int px = x + dx;
+        int sum= clientRightHalf[(y-2)*HALF_WIDTH + (x-2)] +
+            clientRightHalf[(y-2)*HALF_WIDTH + (x-1)] +
+            clientRightHalf[(y-2)*HALF_WIDTH + (x)] +
+            clientRightHalf[(y-2)*HALF_WIDTH + (x+1)] +
+            clientRightHalf[(y-2)*HALF_WIDTH + (x+2)] +
+            clientRightHalf[(y-1)*HALF_WIDTH + (x-2)] +
+            clientRightHalf[(y-1)*HALF_WIDTH + (x-1)] +
+            clientRightHalf[(y-1)*HALF_WIDTH + (x)] +
+            clientRightHalf[(y-1)*HALF_WIDTH + (x+1)] +
+            clientRightHalf[(y-1)*HALF_WIDTH + (x+2)] +
+            clientRightHalf[y*HALF_WIDTH + (x-2)] +
+            clientRightHalf[y*HALF_WIDTH + (x-1)] +
+            clientRightHalf[y*HALF_WIDTH + (x)] +
+            clientRightHalf[y*HALF_WIDTH + (x+1)] +
+            clientRightHalf[y*HALF_WIDTH + (x+2)] +
+            clientRightHalf[(y+1)*HALF_WIDTH + (x-2)] +
+            clientRightHalf[(y+1)*HALF_WIDTH + (x-1)] +
+            clientRightHalf[(y+1)*HALF_WIDTH + (x)] +
+            clientRightHalf[(y+1)*HALF_WIDTH + (x+1)] +
+            clientRightHalf[(y+1)*HALF_WIDTH + (x+2)] +
+            clientRightHalf[(y+2)*HALF_WIDTH + (x-2)] +
+            clientRightHalf[(y+2)*HALF_WIDTH + (x-1)] +
+            clientRightHalf[(y+2)*HALF_WIDTH + (x)] +
+            clientRightHalf[(y+2)*HALF_WIDTH + (x+1)] +
+            clientRightHalf[(y+2)*HALF_WIDTH + (x+2)];
 
-                if (px < 0 || px >= HALF_WIDTH || bottomY < 0 || bottomY >= IMG_HEIGHT)
-                    continue;
-
-                int topIndex = topY * HALF_WIDTH + px;
-                int bottomIndex = bottomY * HALF_WIDTH + px;
-
-                uint8_t topVal = apRightHalf[topIndex];
-                uint8_t bottomVal = clientRightHalf[bottomIndex];
-
-                sad += abs(topVal - bottomVal);
-            }
-        }
+        sad= abs(ColumnSums[yy-2]-sum);
 
         if (sad < minSAD) {
             minSAD = sad;
@@ -177,8 +250,9 @@ int findBestVerticalDisparityRight(int x, int y, int maxDisparity) {
     return bestDisparity;
 }
 
+
 float computeDepth(int disparity, float focalLength, float baseline) {
-    if (disparity == 0) return 255.0f;  // avoid division by zero, assume far away
+    if (disparity == 0) return 9999.0f;  // max depth cap // avoid division by zero, assume far away
 
     return (focalLength * baseline) / disparity;
 }
@@ -187,12 +261,19 @@ float computeDepth(int disparity, float focalLength, float baseline) {
 void computeRightDepth() {
   float focalLength = 25.0f;  // Adjusted due to 2x downscale
   float baseline = 10.0f;     // cm
-  float cx = DS_HALF_WIDTH / 2.0f;
-  float cy = DS_HEIGHT / 2.0f;
+  float cx = HALF_WIDTH / 2.0f;
+  float cy = IMG_HEIGHT / 2.0f;
+  int index = 0;
 
-  for (int y = 0; y < DS_HEIGHT; y++) {
-    for (int x = 0; x < DS_HALF_WIDTH; x++) {
-      int disp = findBestVerticalDisparityRight(x, y, 60);  // maxDisparity = 60
+  for (int x = 2; x < HALF_WIDTH-2; x++) {
+    //skip the loop is x is not valid
+    //if(x<2 || x >= HALF_WIDTH-2) continue;
+    calculateColumnSums(x);
+
+    for (int y = 2; y < IMG_HEIGHT-2; y++) {
+    //skip the loop is y is not valid
+      //if (y < 2 || y >= IMG_HEIGHT - 2) continue;
+      int disp = findBestVerticalDisparityRight(x, y, IMG_HEIGHT - y - 2);  // maxDisparity = 57
       float depth = computeDepth(disp, focalLength, baseline);
 
       if (depth > 255.0f || disp == 0) depth = 255.0f;
@@ -206,14 +287,14 @@ void computeRightDepth() {
       scaledX = constrain(scaledX, 0, 255);
       scaledY = constrain(scaledY, 0, 255);
 
-      int index = y * DS_HALF_WIDTH + x;
+      
       worldXmap[index] = (uint8_t)scaledX;
       worldYmap[index] = (uint8_t)scaledY;
-      worldZmap[index] = (uint8_t)depth;
+      worldZmap[index] = depth;
+        index++;
     }
   }
 }
-
 
 
 void handleGetDepth() {
@@ -227,6 +308,8 @@ void handleGetDepth() {
   http.GET();
   http.end();
 
+  delay(100);////////////////////////
+
   // Send LEFT half to client
   HTTPClient http2;
   http2.begin(client, "http://192.168.4.2/receive_left_half");
@@ -239,19 +322,43 @@ void handleGetDepth() {
   http2.end();//////////////////////////////////////////
 
   //get the right half
-
+    // ✅ NEW: Fetch clientRightHalf from client
+  fetchClientRightHalf();
+  printClientRightHalf();
   //calculate x, y, z values and store
 
   computeRightDepth();
 
   //last depth value sending at the end
-  String json = "[";
-  for (int i = 0; i < IMG_WIDTH * IMG_HEIGHT; i++) {
-    json += String(depthMap[i]);
-    if (i < IMG_WIDTH * IMG_HEIGHT - 1) json += ",";
+  // String json = "[";
+  // for (int i = 0; i < IMG_WIDTH * IMG_HEIGHT; i++) {
+  //   json += String(worldZmap[i]);
+  //   if (i < IMG_WIDTH * IMG_HEIGHT - 1) json += ",";
+  // }
+
+  String json = "{";
+  
+  json += "\"X\":[";
+  for (int i = 0; i < DS_HEIGHT * DS_HALF_WIDTH; i++) {
+    json += worldXmap[i];
+    if (i < DS_HEIGHT * DS_HALF_WIDTH - 1) json += ",";
   }
-  json += "]";
+  json += "],\"Y\":[";
+  for (int i = 0; i < DS_HEIGHT * DS_HALF_WIDTH; i++) {
+    json += worldYmap[i];
+    if (i < DS_HEIGHT * DS_HALF_WIDTH - 1) json += ",";
+  }
+  json += "],\"Z\":[";
+  for (int i = 0; i < DS_HEIGHT * DS_HALF_WIDTH; i++) {
+    json += String(worldZmap[i], 2);
+    if (i < DS_HEIGHT * DS_HALF_WIDTH - 1) json += ",";
+  }
+  json += "]}";
+
   server.send(200, "application/json", json);
+
+  // json += "]";
+  // server.send(200, "application/json", json);
   //server.send(200, "text/plain", "AP done");
 }
 
@@ -282,8 +389,93 @@ void handleDepthMap() {
   server.send(200, "application/json", json);
 }
 */
+void doDepthProcess() {
+  Serial.println("Start depth flow...");
+
+  captureAndSplit();
+
+  // Trigger client capture
+  HTTPClient http;
+  http.begin(client, "http://192.168.4.2/capture");
+  int code = http.GET();
+  http.end();
+
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("Failed to trigger client capture: %d\n", code);
+    return;
+  }
+
+  delay(100);
+
+  // Send LEFT half to client
+  HTTPClient http2;
+  http2.begin(client, "http://192.168.4.2/receive_left_half");
+  String payload;
+  payload.reserve(IMG_HEIGHT * HALF_WIDTH * 4); // Rough reserve
+  for (int i = 0; i < IMG_HEIGHT * HALF_WIDTH; i++) {
+    payload += String(apLeftHalf[i]);
+    if (i < IMG_HEIGHT * HALF_WIDTH - 1) payload += ",";
+  }
+  int code2 = http2.POST(payload);
+  http2.end();
+
+  if (code2 != HTTP_CODE_OK) {
+    Serial.printf("Failed to send left half: %d\n", code2);
+    return;
+  }
+
+  // Get right half from client
+  fetchClientRightHalf();
+  printClientRightHalf();
+
+  // Calculate depth
+  computeRightDepth();
+
+  // (Optionally) send depth map back or do other tasks
+}
+/*
+void WiFiEvent(WiFiEvent_t event) {
+  switch(event) {
+    case WIFI_EVENT_AP_STACONNECTED:
+      Serial.println("Client connected to AP");
+      break;
+    case WIFI_EVENT_AP_STADISCONNECTED:
+      Serial.println("Client disconnected from AP");
+      break;
+    default:
+      break;
+  }
+}
+*/
+void handleDepthData() {
+  String json = "{";
+  
+  json += "\"X\":[";
+  for (int i = 0; i < DS_HEIGHT * DS_HALF_WIDTH; i++) {
+    json += worldXmap[i];
+    if (i < DS_HEIGHT * DS_HALF_WIDTH - 1) json += ",";
+  }
+  json += "],\"Y\":[";
+  for (int i = 0; i < DS_HEIGHT * DS_HALF_WIDTH; i++) {
+    json += worldYmap[i];
+    if (i < DS_HEIGHT * DS_HALF_WIDTH - 1) json += ",";
+  }
+  json += "],\"Z\":[";
+  for (int i = 0; i < DS_HEIGHT * DS_HALF_WIDTH; i++) {
+    json += String(worldZmap[i], 2);
+    if (i < DS_HEIGHT * DS_HALF_WIDTH - 1) json += ",";
+  }
+  json += "]}";
+
+  server.send(200, "application/json", json);
+}
+
+
+
 void setup() {
   Serial.begin(115200);
+
+ // WiFi.onEvent(WiFiEvent);  // Register event handler
   setupCamera();
   WiFi.softAP(ssid, password);
   Serial.println(WiFi.softAPIP());
@@ -292,11 +484,23 @@ void setup() {
   server.on("/post_left_depth", HTTP_POST, handleReceiveLeftDepth);
   server.on("/post_client_right", HTTP_POST, handlePostClientRight);/////////////
 
+   //server.on("/depth", HTTP_GET, handleDepthData);
+
+  startDepthProcess= true;
   //server.on("/depth_map", HTTP_GET, handleDepthMap);
   server.begin();
   Serial.println("AP ready");
+  //doDepthProcess();
 }
 
 void loop() {
   server.handleClient();
+  //handleGetDepth();
+  //   if (startDepthProcess) {
+  //   startDepthProcess = false;
+  //  doDepthProcess();
+  // }
+
+  delay(2000);
+ // doDepthProcess();
 }
